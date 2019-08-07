@@ -1,0 +1,279 @@
+﻿// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel BlurEffect
+#pragma kernel LUTEffect
+#pragma kernel LUTEffectHSV
+
+int image_width;
+int image_height;
+
+// for blur effect
+float depth_threshold;
+int blur_r;
+
+// for lut effect
+int map_width;
+float filter_strength;
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+Texture2D<float4>		in_color_map;			// input color map for FG
+Texture2D<float4>		in_color_map2;			// input color map for BG
+
+Texture2D<float4>		in_hsv_map;				// input hsv map for FG
+Texture2D<float4>		in_hsv_map2;			// input hsv map for BG
+
+Texture2D<float4>		in_color_texture;		// input color
+Texture2D<float>	    in_depth_texture;		// input depth
+RWTexture2D<float4>	    out_color_texture;		// output color
+
+[numthreads(8, 8, 1)]
+void BlurEffect(int3 threadID : SV_GroupThreadID, int3 groupID : SV_GroupID)
+{
+	int x = threadID.x + groupID.x * 8;
+	int y = threadID.y + groupID.y * 8;
+
+	if (x < image_width	// need it?
+	 && y < image_height)
+	{
+/*		float4 pixel_value = float4(
+			in_depth_texture[int2(x, y)].r * 5.0,
+			in_depth_texture[int2(x, y)].r * 5.0,
+			in_depth_texture[int2(x, y)].r * 5.0,
+			1.0);
+*/
+
+			float4 pixel_value = float4(
+				in_color_texture[int2(x, y)].r,
+				in_color_texture[int2(x, y)].g,
+				in_color_texture[int2(x, y)].b,
+				in_color_texture[int2(x, y)].a);
+
+		if (in_depth_texture[int2(x, y)].r * 65.536 > depth_threshold)
+		{
+			int pixel_counter = 1;
+
+			for (int j =-blur_r; j < blur_r; j++)
+			{
+				for (int k =-blur_r; k < blur_r; k++)
+				{
+					float4 temp_color = in_color_texture[int2(x + j, y + k)];
+//					float4 temp_color = in_depth_texture[int2(x + j, y + k)] * 5.0;
+
+					float temp_d = in_depth_texture[int2(x + j, y + k)].r * 65.536;
+
+					if (temp_d > depth_threshold)
+					{
+						pixel_value += temp_color;
+						pixel_counter++;
+					}
+				}
+			}
+
+			pixel_value = pixel_value / pixel_counter;
+		}
+
+/*
+		// image effects
+		float effect_r = in_color_maps[int2(pixel_value.r * map_width, effect_index)].r + 0.01;
+		float effect_g = in_color_maps[int2(pixel_value.g * map_width, effect_index)].g + 0.01;
+		float effect_b = in_color_maps[int2(pixel_value.b * map_width, effect_index)].b + 0.01;
+
+		pixel_value = float4(pixel_value.r * pixel_value.r / effect_r, pixel_value.g * pixel_value.g / effect_g, pixel_value.b * pixel_value.b / effect_b, pixel_value.a);
+*/
+		out_color_texture[int2(x, y)] = pixel_value;
+	}
+	AllMemoryBarrierWithGroupSync();
+}
+
+[numthreads(8, 8, 1)]
+void LUTEffect(int3 threadID : SV_GroupThreadID, int3 groupID : SV_GroupID)
+{
+	int x = threadID.x + groupID.x * 8;
+	int y = threadID.y + groupID.y * 8;
+
+	if (x < image_width	// need it?
+		&& y < image_height)
+	{
+
+		float4 pixel_value = float4(
+			in_color_texture[int2(x, y)].r,
+			in_color_texture[int2(x, y)].g,
+			in_color_texture[int2(x, y)].b,
+			1.0);
+
+		// image effects
+		float effect_r;
+		float effect_g;
+		float effect_b;
+
+		if (in_depth_texture[int2(x, y)].r * 65.536 > depth_threshold)
+		{
+			effect_r = in_color_map[int2(pixel_value.r * map_width, 0)].r;
+			effect_g = in_color_map[int2(pixel_value.g * map_width, 0)].g;
+			effect_b = in_color_map[int2(pixel_value.b * map_width, 0)].b;
+		}
+		else
+		{ 
+			effect_r = in_color_map2[int2(pixel_value.r * map_width, 0)].r;
+			effect_g = in_color_map2[int2(pixel_value.g * map_width, 0)].g;
+			effect_b = in_color_map2[int2(pixel_value.b * map_width, 0)].b;
+		}
+
+		// apply effect to pixel each color ch
+		pixel_value = float4(effect_r * filter_strength + pixel_value.r * (1.0 - filter_strength),
+							 effect_g * filter_strength + pixel_value.g * (1.0 - filter_strength),
+							 effect_b * filter_strength + pixel_value.b * (1.0 - filter_strength),
+							 1.0f);
+
+		out_color_texture[int2(x, y)] = pixel_value;
+	}
+	AllMemoryBarrierWithGroupSync();
+}
+
+float3 RGB2HSV(float4 in_color)
+{
+	float3 return_hsv = float3(0, 0, 0);
+
+	if (in_color.x == 0
+	 && in_color.y == 0
+	 && in_color.z == 0) { return return_hsv; }
+
+	float min_color = min(in_color.x, min(in_color.y, in_color.z));
+
+	// R is max
+	if (in_color.x >= in_color.y && in_color.x >= in_color.z)
+	{
+		return_hsv.x = 0.1667 * ((in_color.y - in_color.z) / (in_color.r - min_color));
+		return_hsv.y = (in_color.x - min_color) / in_color.x;
+		return_hsv.z = in_color.x;
+	}
+	// G is max
+	else if (in_color.y >= in_color.x && in_color.y >= in_color.z)
+	{
+		return_hsv.x = 0.1667 * ((in_color.z - in_color.x) / (in_color.y - min_color)) + 0.33333;
+		return_hsv.y = (in_color.y - min_color) / in_color.y;
+		return_hsv.z = in_color.y;
+	}
+	// B is max
+	else if (in_color.z >= in_color.x && in_color.z >= in_color.y)
+	{
+		return_hsv.x = 0.1667 * ((in_color.x - in_color.y) / (in_color.z - min_color)) + 0.66667;
+		return_hsv.y = (in_color.z - min_color) / in_color.z;
+		return_hsv.z = in_color.z;
+	}
+	// if all same
+	else
+	{
+		return_hsv.x = 0;
+		return_hsv.y = (in_color.z - min_color) / in_color.z;
+		return_hsv.z = in_color.z;
+	}
+
+	if (return_hsv.x > 1.0) { return_hsv.x -= 1.0; }
+	if (return_hsv.y > 1.0) { return_hsv.y -= 1.0; }
+	if (return_hsv.z > 1.0) { return_hsv.z -= 1.0; }
+	if (return_hsv.x < 0.0) { return_hsv.x += 1.0; }
+	if (return_hsv.y < 0.0) { return_hsv.y += 1.0; }
+	if (return_hsv.z < 0.0) { return_hsv.z += 1.0; }
+
+	return return_hsv;
+}
+
+float4 HSV2RGB(float3 in_hsv)
+{
+	float4 return_color = float4(0, 0, 0, 1);
+	float max_value = in_hsv.z;
+	float min_value = max_value - (in_hsv.y * max_value);
+
+	if (in_hsv.x < 1.0 / 6.0)
+	{
+		return_color.x = max_value;
+		return_color.y = in_hsv.x / (1.0 / 6.0) * (max_value - min_value) + min_value;
+		return_color.z = min_value;
+	}
+	else if (in_hsv.x < 2.0 / 6.0)
+	{
+		return_color.x = (1.0 / 3.0 - in_hsv.x) / (1.0 / 6.0) * (max_value - min_value) + min_value;
+		return_color.y = max_value;
+		return_color.z = min_value;
+	}
+	else if (in_hsv.x < 3.0 / 6.0)
+	{
+		return_color.x = min_value;
+		return_color.y = max_value;
+		return_color.z = (in_hsv.x - 1.0 / 3.0) / (1.0 / 6.0) * (max_value - min_value) + min_value;
+	}
+	else if (in_hsv.x < 4.0 / 6.0)
+	{
+		return_color.x = min_value;
+		return_color.y = (2.0 / 3.0 - in_hsv.x) / (1.0 / 6.0) * (max_value - min_value) + min_value;
+		return_color.z = max_value;
+	}
+	else if (in_hsv.x < 5.0 / 6.0)
+	{
+		return_color.x = (in_hsv.x - 2.0 / 3.0) / (1.0 / 6.0) * (max_value - min_value) + min_value;
+		return_color.y = min_value;
+		return_color.z = max_value;
+	}
+	else 
+	{
+		return_color.x = max_value;
+		return_color.y = min_value;
+		return_color.z = (1.0 - in_hsv.x) / (1.0 / 6.0) * (max_value - min_value) + min_value;
+	}
+
+	return return_color;
+}
+
+[numthreads(8, 8, 1)]
+void LUTEffectHSV(int3 threadID : SV_GroupThreadID, int3 groupID : SV_GroupID)
+{
+	int x = threadID.x + groupID.x * 8;
+	int y = threadID.y + groupID.y * 8;
+
+	if (x < image_width	// need it?
+		&& y < image_height)
+	{
+
+		float4 original_color_value = float4(
+			out_color_texture[int2(x, y)].r,
+			out_color_texture[int2(x, y)].g,
+			out_color_texture[int2(x, y)].b,
+			1.0);
+/*		// used when not using RGB LUT
+		float4 original_color_value = float4(
+			in_color_texture[int2(x, y)].r,
+			in_color_texture[int2(x, y)].g,
+			in_color_texture[int2(x, y)].b,
+			1.0);
+*/
+		float3 hsv_value = RGB2HSV(original_color_value);
+
+		// image effects
+		float3 processed_hsv_value;
+
+		if (in_depth_texture[int2(x, y)].r * 65.536 > depth_threshold)
+		{
+			processed_hsv_value.r = in_hsv_map[int2(hsv_value.r * map_width, 0)].r;
+			processed_hsv_value.g = in_hsv_map[int2(hsv_value.g * map_width, 0)].g;
+			processed_hsv_value.b = in_hsv_map[int2(hsv_value.b * map_width, 0)].b;
+		}
+		else
+		{
+			processed_hsv_value.r = in_hsv_map2[int2(hsv_value.r * map_width, 0)].r;
+			processed_hsv_value.g = in_hsv_map2[int2(hsv_value.g * map_width, 0)].g;
+			processed_hsv_value.b = in_hsv_map2[int2(hsv_value.b * map_width, 0)].b;
+		}
+
+		float4 processed_color_value = HSV2RGB(processed_hsv_value);
+
+		// apply effect to pixel each color ch
+//		out_color_texture[int2(x, y)] = processed_color_value;
+		out_color_texture[int2(x, y)] = float4(
+			processed_color_value.r * filter_strength + original_color_value.r * (1.0 - filter_strength),
+			processed_color_value.g * filter_strength + original_color_value.g * (1.0 - filter_strength),
+			processed_color_value.b * filter_strength + original_color_value.b * (1.0 - filter_strength),
+			1.0f);
+	}
+	AllMemoryBarrierWithGroupSync();
+}
+
